@@ -61,22 +61,112 @@ async def tavily_search(
                 unique_results[url] = {**result, "query": response['query']}
     configurable = Configuration.from_runnable_config(config)
     max_char_to_include = 50_000   # NOTE: This can be tuned by the developer. This character count keeps us safely under input token limits for the latest models.
-    model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+    
+    summarization_model_name = configurable.summarization_model
+    summarization_max_tokens = configurable.summarization_model_max_tokens
+    
+    print(f"[DEBUG] tavily_summarize - model: {summarization_model_name}")
+    api_key = get_api_key_for_model(summarization_model_name, config)
+    print(f"[DEBUG] tavily_summarize - API key obtained: {api_key[:10] if api_key else None}...")
+    
+    # Handle Azure AI Inference models (including DeepSeek on Azure)
+    if summarization_model_name.startswith("azure-ai:"):
+        clean_model_name = summarization_model_name.replace("azure-ai:", "")
+        
+        # LangChain Azure AI expects endpoint and credential via environment variables
+        # AZURE_INFERENCE_ENDPOINT and AZURE_INFERENCE_CREDENTIAL which we set in .env
+        summarization_model_config = {
+            "model": clean_model_name,
+            "model_provider": "azure_ai",
+            "max_tokens": summarization_max_tokens,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] tavily_summarize - Using Azure AI Inference with model: {clean_model_name}")
+    # Handle DeepSeek models (direct API)
+    elif summarization_model_name.startswith("deepseek:"):
+        clean_model_name = summarization_model_name.replace("deepseek:", "")
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if not deepseek_key:
+            deepseek_key = api_key
+            
+        summarization_model_config = {
+            "model": clean_model_name,
+            "model_provider": "deepseek",
+            "max_tokens": summarization_max_tokens,
+            "api_key": deepseek_key,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] tavily_summarize - Using DeepSeek with model: {clean_model_name}")
+    # Handle Azure OpenAI models
+    elif summarization_model_name.startswith("openai:"):
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        if azure_key:
+            clean_model_name = summarization_model_name.replace("openai:", "")
+            
+            # Map different models to specific Azure deployments
+            deployment_mapping = {
+                "gpt-5": "gpt-5-chat",
+                "gpt-5-mini": "gpt-5-mini", 
+                "gpt-5-nano": "gpt-5-nano",
+                "gpt-4.1": "gpt-4.1",
+                "gpt-4.1-mini": "gpt-4.1-mini",
+                "gpt-4.1-nano": "gpt-4.1-nano",
+                "gpt-4o-mini": "gpt-4o-mini"
+            }
+            
+            deployment_name = deployment_mapping.get(clean_model_name, clean_model_name)
+            
+            summarization_model_config = {
+                "model": deployment_name,
+                "model_provider": "azure_openai", 
+                "max_tokens": summarization_max_tokens,
+                "api_key": azure_key,
+                "tags": ["langsmith:nostream"]
+            }
+            print(f"[DEBUG] tavily_summarize - Using Azure OpenAI with model: {clean_model_name}, deployment: {deployment_name}")
+        else:
+            summarization_model_config = {
+                "model": summarization_model_name,
+                "max_tokens": summarization_max_tokens,
+                "api_key": api_key,
+                "tags": ["langsmith:nostream"]
+            }
+            print(f"[DEBUG] tavily_summarize - Using standard config with model: {summarization_model_name}")
+    else:
+        # Default configuration for other providers
+        summarization_model_config = {
+            "model": summarization_model_name,
+            "max_tokens": summarization_max_tokens,
+            "api_key": api_key,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] tavily_summarize - Using standard config with model: {summarization_model_name}")
+    
     summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        tags=["langsmith:nostream"]
+        **summarization_model_config
     ).with_structured_output(Summary).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
     async def noop():
         return None
-    summarization_tasks = [
-        noop() if not result.get("raw_content") else summarize_webpage(
-            summarization_model, 
-            result['raw_content'][:max_char_to_include],
-        )
-        for result in unique_results.values()
-    ]
+    
+    # Add delay between summarization tasks to avoid rate limits
+    async def summarize_with_delay(model, content, delay_seconds=1):
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        return await summarize_webpage(model, content)
+    
+    summarization_tasks = []
+    for i, result in enumerate(unique_results.values()):
+        if not result.get("raw_content"):
+            summarization_tasks.append(noop())
+        else:
+            # Add increasing delay for each task to spread out requests
+            delay = i * 0.5  # 0.5 second delay between each request
+            summarization_tasks.append(summarize_with_delay(
+                summarization_model,
+                result['raw_content'][:max_char_to_include],
+                delay
+            ))
+    
     summaries = await asyncio.gather(*summarization_tasks)
     summarized_results = {
         url: {'title': result['title'], 'content': result['content'] if summary is None else summary}
@@ -448,7 +538,10 @@ def remove_up_to_last_ai_message(messages: list[MessageLikeRepresentation]) -> l
 ##########################
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
-    return datetime.now().strftime("%a %b %-d, %Y")
+    # Windows-compatible version (%-d is not supported on Windows)
+    now = datetime.now()
+    day = now.day  # Get day without leading zero
+    return now.strftime(f"%a %b {day}, %Y")
 
 def get_config_value(value):
     if value is None:
@@ -463,28 +556,69 @@ def get_config_value(value):
 def get_api_key_for_model(model_name: str, config: RunnableConfig):
     should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
     model_name = model_name.lower()
+    
+    # Debug logging
+    print(f"[DEBUG] get_api_key_for_model called with model_name: {model_name}")
+    print(f"[DEBUG] GET_API_KEYS_FROM_CONFIG: {should_get_from_config}")
+    
     if should_get_from_config.lower() == "true":
         api_keys = config.get("configurable", {}).get("apiKeys", {})
         if not api_keys:
+            print("[DEBUG] No API keys found in config")
             return None
         if model_name.startswith("openai:"):
-            return api_keys.get("OPENAI_API_KEY")
+            key = api_keys.get("OPENAI_API_KEY")
+            print(f"[DEBUG] Returning OPENAI_API_KEY from config: {key[:10] if key else None}...")
+            return key
+        elif model_name.startswith("azure-ai:"):
+            key = api_keys.get("AZURE_AI_INFERENCE_API_KEY")
+            print(f"[DEBUG] Returning AZURE_AI_INFERENCE_API_KEY from config: {key[:10] if key else None}...")
+            return key
+        elif model_name.startswith("deepseek:"):
+            key = api_keys.get("DEEPSEEK_API_KEY")
+            print(f"[DEBUG] Returning DEEPSEEK_API_KEY from config: {key[:10] if key else None}...")
+            return key
         elif model_name.startswith("anthropic:"):
             return api_keys.get("ANTHROPIC_API_KEY")
         elif model_name.startswith("google"):
             return api_keys.get("GOOGLE_API_KEY")
+        print(f"[DEBUG] No matching provider for model: {model_name}")
         return None
     else:
+        # Handle Azure AI Inference models
+        if model_name.startswith("azure-ai:"):
+            key = os.getenv("AZURE_AI_INFERENCE_API_KEY")
+            print(f"[DEBUG] Using AZURE_AI_INFERENCE_API_KEY: {key[:10] if key else None}...")
+            return key
+        
+        # Handle DeepSeek models
+        if model_name.startswith("deepseek:"):
+            key = os.getenv("DEEPSEEK_API_KEY")
+            print(f"[DEBUG] Using DEEPSEEK_API_KEY: {key[:10] if key else None}...")
+            return key
+        
+        # Check for Azure OpenAI first
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        if azure_key and (model_name.startswith("gpt-") or model_name.startswith("openai:")):
+            print(f"[DEBUG] Using Azure OpenAI API key for model: {model_name}")
+            print(f"[DEBUG] Azure key found: {azure_key[:10] if azure_key else None}...")
+            return azure_key
+            
         if model_name.startswith("openai:"): 
-            return os.getenv("OPENAI_API_KEY")
+            key = os.getenv("OPENAI_API_KEY")
+            print(f"[DEBUG] Using standard OPENAI_API_KEY: {key[:10] if key else None}...")
+            return key
         elif model_name.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")
         elif model_name.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
+        
+        print(f"[DEBUG] No API key found for model: {model_name}")
         return None
 
 def get_tavily_api_key(config: RunnableConfig):
     should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
+    # Reduced debug output for cleaner logs
     if should_get_from_config.lower() == "true":
         api_keys = config.get("configurable", {}).get("apiKeys", {})
         if not api_keys:

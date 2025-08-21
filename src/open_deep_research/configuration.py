@@ -30,11 +30,11 @@ class MCPConfig(BaseModel):
 class Configuration(BaseModel):
     # General Configuration
     max_structured_output_retries: int = Field(
-        default=3,
+        default=2,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 3,
+                "default": 2,
                 "min": 1,
                 "max": 10,
                 "description": "Maximum number of retries for structured output calls from models"
@@ -52,11 +52,11 @@ class Configuration(BaseModel):
         }
     )
     max_concurrent_research_units: int = Field(
-        default=5,
+        default=1,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 5,
+                "default": 1,
                 "min": 1,
                 "max": 20,
                 "step": 1,
@@ -82,11 +82,11 @@ class Configuration(BaseModel):
         }
     )
     max_researcher_iterations: int = Field(
-        default=3,
+        default=2,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 3,
+                "default": 2,
                 "min": 1,
                 "max": 10,
                 "step": 1,
@@ -95,11 +95,11 @@ class Configuration(BaseModel):
         }
     )
     max_react_tool_calls: int = Field(
-        default=5,
+        default=3,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 5,
+                "default": 3,
                 "min": 1,
                 "max": 30,
                 "step": 1,
@@ -109,12 +109,12 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-nano",
+        default="openai:gpt-4o-mini",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-nano",
-                "description": "Model for summarizing research results from Tavily search results"
+                "default": "openai:gpt-4o-mini",
+                "description": "Model for summarizing research results from Tavily search results (high frequency, keep lightweight)"
             }
         }
     )
@@ -134,7 +134,7 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1",
-                "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
+                "description": "Model for conducting research (complex reasoning, use best model). NOTE: Make sure your Researcher Model supports the selected search API."
             }
         }
     )
@@ -154,7 +154,7 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1-mini",
-                "description": "Model for compressing research findings from sub-agents. NOTE: Make sure your Compression Model supports the selected search API."
+                "description": "Model for compressing research findings from sub-agents (medium complexity). NOTE: Make sure your Compression Model supports the selected search API."
             }
         }
     )
@@ -174,7 +174,7 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1",
-                "description": "Model for writing the final report from all research findings"
+                "description": "Model for writing the final report from all research findings (highest quality for final output)"
             }
         }
     )

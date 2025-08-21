@@ -64,9 +64,9 @@ Open Deep Research offers extensive configuration options to customize the resea
 
 Open Deep Research uses multiple specialized models for different research tasks:
 
-- **Summarization Model** (default: `openai:gpt-4.1-nano`): Summarizes research results from search APIs
+- **Summarization Model** (default: `openai:gpt-4.1`): Summarizes research results from search APIs
 - **Research Model** (default: `openai:gpt-4.1`): Conducts research and analysis 
-- **Compression Model** (default: `openai:gpt-4.1-mini`): Compresses research findings from sub-agents
+- **Compression Model** (default: `openai:gpt-4.1`): Compresses research findings from sub-agents
 - **Final Report Model** (default: `openai:gpt-4.1`): Writes the final comprehensive report
 
 All models are configured using [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/) which supports providers like OpenAI, Anthropic, Google Vertex AI, and others.

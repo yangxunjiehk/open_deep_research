@@ -42,20 +42,100 @@ from open_deep_research.utils import (
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "model_provider", "max_tokens", "api_key"),
 )
+
+def get_model_config(model_name: str, max_tokens: int, config: RunnableConfig, debug_prefix: str = ""):
+    """Helper function to get model configuration for any supported provider"""
+    print(f"[DEBUG] {debug_prefix} - model: {model_name}")
+    api_key = get_api_key_for_model(model_name, config)
+    print(f"[DEBUG] {debug_prefix} - API key obtained: {api_key[:10] if api_key else None}...")
+    
+    import os
+    
+    # Handle Azure AI Inference models (including DeepSeek on Azure)
+    if model_name.startswith("azure-ai:"):
+        clean_model_name = model_name.replace("azure-ai:", "")
+        
+        # LangChain Azure AI expects endpoint and credential via environment variables
+        # AZURE_INFERENCE_ENDPOINT and AZURE_INFERENCE_CREDENTIAL which we set in .env
+        model_config = {
+            "model": clean_model_name,
+            "model_provider": "azure_ai",
+            "max_tokens": max_tokens,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] {debug_prefix} - Using Azure AI Inference with model: {clean_model_name}")
+        return model_config
+    
+    # Handle DeepSeek models (direct API)
+    if model_name.startswith("deepseek:"):
+        clean_model_name = model_name.replace("deepseek:", "")
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if not deepseek_key:
+            deepseek_key = api_key  # fallback to generic api_key
+            
+        model_config = {
+            "model": clean_model_name,
+            "model_provider": "deepseek",
+            "max_tokens": max_tokens,
+            "api_key": deepseek_key,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] {debug_prefix} - Using DeepSeek with model: {clean_model_name}")
+        return model_config
+    
+    # Handle Azure OpenAI models
+    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+    if azure_key and model_name.startswith("openai:"):
+        # Force Azure OpenAI configuration
+        clean_model_name = model_name.replace("openai:", "")
+        
+        # Map different models to specific Azure deployments
+        deployment_mapping = {
+            "gpt-5": "gpt-5-chat",
+            "gpt-5-mini": "gpt-5-mini", 
+            "gpt-5-nano": "gpt-5-nano",
+            "gpt-4.1": "gpt-4.1",
+            "gpt-4.1-mini": "gpt-4.1-mini",
+            "gpt-4.1-nano": "gpt-4.1-nano",
+            "gpt-4o-mini": "gpt-4o-mini"
+        }
+        
+        deployment_name = deployment_mapping.get(clean_model_name, clean_model_name)
+        
+        model_config = {
+            "model": deployment_name,
+            "model_provider": "azure_openai", 
+            "max_tokens": max_tokens,
+            "api_key": azure_key,
+            "tags": ["langsmith:nostream"]
+        }
+        print(f"[DEBUG] {debug_prefix} - Using Azure OpenAI with model: {clean_model_name}, deployment: {deployment_name}")
+        return model_config
+    
+    # Default configuration for other providers
+    model_config = {
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "api_key": api_key,
+        "tags": ["langsmith:nostream"]
+    }
+    print(f"[DEBUG] {debug_prefix} - Using standard config with model: {model_name}")
+    return model_config
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     configurable = Configuration.from_runnable_config(config)
     if not configurable.allow_clarification:
         return Command(goto="write_research_brief")
     messages = state["messages"]
-    model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    
+    model_config = get_model_config(
+        configurable.research_model, 
+        configurable.research_model_max_tokens, 
+        config, 
+        "clarify_with_user"
+    )
     model = configurable_model.with_structured_output(ClarifyWithUser).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(model_config)
     response = await model.ainvoke([HumanMessage(content=clarify_with_user_instructions.format(messages=get_buffer_string(messages), date=get_today_str()))])
     if response.need_clarification:
@@ -66,12 +146,13 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
 
 async def write_research_brief(state: AgentState, config: RunnableConfig)-> Command[Literal["research_supervisor"]]:
     configurable = Configuration.from_runnable_config(config)
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    
+    research_model_config = get_model_config(
+        configurable.research_model, 
+        configurable.research_model_max_tokens, 
+        config, 
+        "write_research_brief"
+    )
     research_model = configurable_model.with_structured_output(ResearchQuestion).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(research_model_config)
     response = await research_model.ainvoke([HumanMessage(content=transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(state.get("messages", [])),
@@ -97,12 +178,13 @@ async def write_research_brief(state: AgentState, config: RunnableConfig)-> Comm
 
 async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[Literal["supervisor_tools"]]:
     configurable = Configuration.from_runnable_config(config)
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    
+    research_model_config = get_model_config(
+        configurable.research_model, 
+        configurable.research_model_max_tokens, 
+        config, 
+        "supervisor"
+    )
     lead_researcher_tools = [ConductResearch, ResearchComplete]
     research_model = configurable_model.bind_tools(lead_researcher_tools).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(research_model_config)
     supervisor_messages = state.get("supervisor_messages", [])
@@ -198,12 +280,13 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     tools = await get_all_tools(config)
     if len(tools) == 0:
         raise ValueError("No tools found to conduct research: Please configure either your search API or add MCP tools to your configuration.")
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    
+    research_model_config = get_model_config(
+        configurable.research_model, 
+        configurable.research_model_max_tokens, 
+        config, 
+        "researcher"
+    )
     researcher_system_prompt = research_system_prompt.format(mcp_prompt=configurable.mcp_prompt or "", date=get_today_str())
     research_model = configurable_model.bind_tools(tools).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(research_model_config)
     response = await research_model.ainvoke([SystemMessage(content=researcher_system_prompt)] + researcher_messages)
@@ -264,12 +347,13 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
 async def compress_research(state: ResearcherState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     synthesis_attempts = 0
-    synthesizer_model = configurable_model.with_config({
-        "model": configurable.compression_model,
-        "max_tokens": configurable.compression_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.compression_model, config),
-        "tags": ["langsmith:nostream"]
-    })
+    compression_config = get_model_config(
+        configurable.compression_model, 
+        configurable.compression_model_max_tokens, 
+        config, 
+        "compress_research"
+    )
+    synthesizer_model = configurable_model.with_config(compression_config)
     researcher_messages = state.get("researcher_messages", [])
     # Update the system prompt to now focus on compression rather than research.
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
@@ -306,11 +390,12 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     notes = state.get("notes", [])
     cleared_state = {"notes": {"type": "override", "value": []},}
     configurable = Configuration.from_runnable_config(config)
-    writer_model_config = {
-        "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-    }
+    writer_model_config = get_model_config(
+        configurable.final_report_model, 
+        configurable.final_report_model_max_tokens, 
+        config, 
+        "final_report_generation"
+    )
     
     findings = "\n".join(notes)
     max_retries = 3
