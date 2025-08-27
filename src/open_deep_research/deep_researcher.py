@@ -319,29 +319,105 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     tools = await get_all_tools(config)
     tools_by_name = {tool.name if hasattr(tool, "name") else tool.get("name", "web_search"):tool for tool in tools}
     tool_calls = most_recent_message.tool_calls
-    coros = [execute_tool_safely(tools_by_name[tool_call["name"]], tool_call["args"], config) for tool_call in tool_calls]
-    observations = await asyncio.gather(*coros)
+    
+    # 执行工具调用，并在执行过程中记录详细信息
+    observations = []
+    tool_execution_details = []
+    
+    print(f"[DEBUG] Total tool calls to execute: {len(tool_calls)}")
+    for tool_call in tool_calls:
+        print(f"[DEBUG] Tool call: {tool_call}")
+    
+    for i, tool_call in enumerate(tool_calls):
+        tool_name = tool_call["name"]
+        tool_args = tool_call.get("args", {})
+        
+        print(f"[DEBUG] Starting tool execution: {tool_name} ({i + 1}/{len(tool_calls)}) with args: {tool_args}")
+        
+        # 立即发送工具开始执行的实时事件 - 通过状态更新机制
+        starting_detail = {
+            "tool_name": tool_name,
+            "tool_index": i + 1,
+            "total_tools": len(tool_calls),
+            "status": "starting",
+            "args": tool_args,
+            "timestamp": f"Tool {i + 1}/{len(tool_calls)} starting"
+        }
+        tool_execution_details.append(starting_detail)
+        
+        print(f"[DEBUG] Recording starting status for {tool_name}")
+        
+        try:
+            print(f"[DEBUG] About to call execute_tool_safely for {tool_name}")
+            # 执行工具
+            observation = await execute_tool_safely(tools_by_name[tool_name], tool_args, config)
+            print(f"[DEBUG] execute_tool_safely returned for {tool_name}")
+            observations.append(observation)
+            
+            # 工具完成后的详情
+            completed_detail = {
+                "tool_name": tool_name,
+                "tool_index": i + 1,
+                "total_tools": len(tool_calls),
+                "status": "completed",
+                "args": tool_args,
+                "result_length": len(str(observation)) if observation else 0,
+                "timestamp": f"Tool {i + 1}/{len(tool_calls)} completed"
+            }
+            tool_execution_details.append(completed_detail)
+            
+            
+            print(f"[DEBUG] Completed tool execution: {tool_name}, result length: {completed_detail['result_length']}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in tool execution: {tool_name}, error: {e}")
+            import traceback
+            print(f"[DEBUG] Full traceback: {traceback.format_exc()}")
+            # 即使出错也记录到详情中
+            error_detail = {
+                "tool_name": tool_name,
+                "tool_index": i + 1,
+                "total_tools": len(tool_calls),
+                "status": "error",
+                "args": tool_args,
+                "error": str(e),
+                "timestamp": f"Tool {i + 1}/{len(tool_calls)} error"
+            }
+            tool_execution_details.append(error_detail)
+            observations.append(f"Error: {str(e)}")
+    
     tool_outputs = [ToolMessage(
                         content=observation,
                         name=tool_call["name"],
                         tool_call_id=tool_call["id"]
                     ) for observation, tool_call in zip(observations, tool_calls)]
     
+    print(f"[DEBUG] Prepared tool_execution_details with {len(tool_execution_details)} items:")
+    for detail in tool_execution_details:
+        print(f"[DEBUG] Tool detail: {detail}")
+    
     # Late Exit Criteria: We have exceeded our max guardrail tool call iterations or the most recent message contains a ResearchComplete tool call
     # These are late exit criteria because we need to add ToolMessages
     if state.get("tool_call_iterations", 0) >= configurable.max_react_tool_calls or any(tool_call["name"] == "ResearchComplete" for tool_call in most_recent_message.tool_calls):
+        print(f"[DEBUG] Returning final Command to compress_research with tool_execution_details")
         return Command(
             goto="compress_research",
             update={
                 "researcher_messages": tool_outputs,
+                "tool_execution_details": tool_execution_details,  # 添加工具执行详情
+                "current_tool_status": "所有工具执行完成，正在压缩研究结果..."
             }
         )
-    return Command(
-        goto="researcher",
-        update={
-            "researcher_messages": tool_outputs,
-        }
-    )
+    else:
+        print(f"[DEBUG] Returning final Command to researcher with tool_execution_details")
+        return Command(
+            goto="researcher",
+            update={
+                "researcher_messages": tool_outputs,
+                "tool_execution_details": tool_execution_details,  # 添加工具执行详情
+                "current_tool_status": "所有工具执行完成，继续研究..."
+            }
+        )
 
 
 async def compress_research(state: ResearcherState, config: RunnableConfig):

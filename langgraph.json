@@ -1,14 +1,12 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-      "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher"
+      "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher",
+      "Deep Researcher Flat": "./src/open_deep_research/flat_graph.py:flat_researcher"
     },
     "python_version": "3.11",
     "env": "./.env",
     "dependencies": [
       "."
-    ],
-    "auth": {
-      "path": "./src/security/auth.py:auth"
-    }
+    ]
 }

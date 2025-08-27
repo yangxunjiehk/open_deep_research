@@ -57,6 +57,10 @@ class AgentState(MessagesState):
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    tool_calls: Optional[list] = []
+    current_research_step: int = 0
+    search_results: Optional[list] = []
+    research_iterations: int = 0
 
 class SupervisorState(TypedDict):
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]

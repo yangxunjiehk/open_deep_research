@@ -1,0 +1,21 @@
+{
+    "dockerfile_lines": [],
+    "graphs": {
+      "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher"
+    },
+    "python_version": "3.11",
+    "env": "./.env",
+    "dependencies": [
+      "."
+    ],
+    "env_variables": {
+        "ALLOW_CLARIFICATION": "false",
+        "MAX_RESEARCHER_ITERATIONS": "1",
+        "MAX_REACT_TOOL_CALLS": "1",
+        "MAX_CONCURRENT_RESEARCH_UNITS": "1",
+        "SUMMARIZATION_MODEL": "openai:gpt-4o-mini",
+        "RESEARCH_MODEL": "openai:gpt-4o-mini",
+        "COMPRESSION_MODEL": "openai:gpt-4o-mini",
+        "FINAL_REPORT_MODEL": "openai:gpt-4o-mini"
+    }
+}
