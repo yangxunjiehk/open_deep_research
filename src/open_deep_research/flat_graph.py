@@ -39,6 +39,13 @@ from open_deep_research.utils import (
     anthropic_websearch_called,
 )
 
+def update_step_status(step_name: str, status: str):
+    """辅助函数：创建步骤状态更新"""
+    return {
+        "step_status": {"type": "override", "value": {step_name: status}},
+        "current_step": step_name
+    }
+
 
 def get_model_config(model_name: str, max_tokens: int, config: RunnableConfig, debug_prefix: str = "") -> dict:
     """获取模型配置"""
@@ -206,6 +213,9 @@ async def plan_research_node(state: AgentState, config: RunnableConfig) -> Comma
 
 async def execute_research_tools_node(state: AgentState, config: RunnableConfig) -> Command[Literal["perform_searches", "compress_research", "__end__"]]:
     """执行研究工具 - 相当于原来的supervisor_tools节点"""
+    from langgraph.config import get_stream_writer
+    import time
+    
     configurable = Configuration.from_runnable_config(config)
     supervisor_messages = state.get("supervisor_messages", [])
     most_recent_message = supervisor_messages[-1]
@@ -227,6 +237,21 @@ async def execute_research_tools_node(state: AgentState, config: RunnableConfig)
             update={}
         )
     
+    # 🚀 发送搜索开始状态到前端
+    try:
+        writer = get_stream_writer()
+        if writer:
+            writer({
+                "event_type": "step_status",
+                "step": "web_search",
+                "status": "started",
+                "message": "准备开始 Tavily 搜索...",
+                "timestamp": time.time(),
+                "tool_calls_count": len(most_recent_message.tool_calls)
+            })
+    except Exception as e:
+        print(f"Failed to send stream event: {e}")
+    
     # 准备进行研究
     return Command(
         goto="perform_searches",
@@ -239,12 +264,29 @@ async def execute_research_tools_node(state: AgentState, config: RunnableConfig)
 
 async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Command[Literal["analyze_search_results", "plan_research"]]:
     """执行搜索 - 这是最重要的节点，执行Tavily搜索"""
+    from langgraph.config import get_stream_writer
+    import time
+    
     configurable = Configuration.from_runnable_config(config)
     
     # 获取要执行的工具调用
     tool_calls = state.get("tool_calls", [])
     if not tool_calls:
         return Command(goto="plan_research")
+    
+    # 🚀 发送搜索开始进行状态
+    try:
+        writer = get_stream_writer()
+        if writer:
+            writer({
+                "event_type": "step_status",
+                "step": "web_search",
+                "status": "in_progress",
+                "message": f"正在执行 {len(tool_calls)} 个 Tavily 搜索...",
+                "timestamp": time.time()
+            })
+    except Exception as e:
+        print(f"Failed to send stream event: {e}")
     
     # 执行Tavily搜索
     tools = await get_all_tools(config)
@@ -259,6 +301,20 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
             # 截断查询以符合 Tavily 的 400 字符限制
             if len(research_topic) > 400:
                 research_topic = research_topic[:400]
+            
+            # 🚀 发送单个搜索进度
+            try:
+                if writer:
+                    writer({
+                        "event_type": "search_progress",
+                        "current": i + 1,
+                        "total": len(tool_calls),
+                        "query": research_topic[:50] + "..." if len(research_topic) > 50 else research_topic,
+                        "message": f"搜索 {i + 1}/{len(tool_calls)}: {research_topic[:50]}...",
+                        "timestamp": time.time()
+                    })
+            except Exception as e:
+                print(f"Failed to send progress event: {e}")
             
             # 这里执行实际的搜索
             # 为了简化，我们直接调用tavily_search工具
@@ -280,6 +336,28 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
                         "tool_call_id": tool_call["id"]
                     })
     
+    # 🚀 发送搜索完成和分析开始状态
+    try:
+        if writer:
+            writer({
+                "event_type": "step_status",
+                "step": "web_search",
+                "status": "completed",
+                "message": f"Tavily 搜索完成，获得 {len(search_results)} 个结果",
+                "timestamp": time.time(),
+                "results_count": len(search_results)
+            })
+            
+            writer({
+                "event_type": "step_status", 
+                "step": "search_analysis",
+                "status": "started",
+                "message": "开始分析搜索结果...",
+                "timestamp": time.time()
+            })
+    except Exception as e:
+        print(f"Failed to send completion event: {e}")
+    
     return Command(
         goto="analyze_search_results",
         update={
@@ -291,8 +369,25 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
 
 async def analyze_search_results_node(state: AgentState, config: RunnableConfig) -> Command[Literal["compress_research", "plan_research"]]:
     """分析搜索结果 - 总结和整理搜索结果"""
+    from langgraph.config import get_stream_writer
+    import time
+    
     configurable = Configuration.from_runnable_config(config)
     search_results = state.get("search_results", [])
+    
+    # 🚀 发送分析进行中状态
+    try:
+        writer = get_stream_writer()
+        if writer:
+            writer({
+                "event_type": "step_status",
+                "step": "search_analysis", 
+                "status": "in_progress",
+                "message": f"正在分析 {len(search_results)} 个搜索结果...",
+                "timestamp": time.time()
+            })
+    except Exception as e:
+        print(f"Failed to send analysis progress event: {e}")
     
     if not search_results:
         return Command(goto="plan_research")
@@ -311,6 +406,19 @@ async def analyze_search_results_node(state: AgentState, config: RunnableConfig)
             name="ConductResearch",
             tool_call_id=result["tool_call_id"]
         ))
+    
+    # 🚀 发送分析完成状态
+    try:
+        if writer:
+            writer({
+                "event_type": "step_status",
+                "step": "search_analysis",
+                "status": "completed", 
+                "message": f"搜索结果分析完成，处理了 {len(search_results)} 个结果",
+                "timestamp": time.time()
+            })
+    except Exception as e:
+        print(f"Failed to send analysis completion event: {e}")
     
     # 检查是否需要继续研究
     iterations = state.get("research_iterations", 0) + 1

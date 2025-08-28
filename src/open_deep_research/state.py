@@ -61,6 +61,9 @@ class AgentState(MessagesState):
     current_research_step: int = 0
     search_results: Optional[list] = []
     research_iterations: int = 0
+    # 实时步骤状态追踪
+    step_status: dict = {}
+    current_step: Optional[str] = None
 
 class SupervisorState(TypedDict):
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
