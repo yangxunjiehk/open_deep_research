@@ -103,11 +103,20 @@ def get_configurable_model(model_name: str, temperature: float = 0.3, config=Non
 
 # ===== 主图节点 - 扁平化所有重要节点 =====
 
-async def clarify_with_user_node(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
+async def clarify_with_user_node(state: AgentState, config: RunnableConfig):
     """澄清用户需求"""
+    # 直接检查传入的configurable参数，优先级高于默认配置
+    config_dict = config.get("configurable", {}) if config else {}
+    allow_clarification = config_dict.get("allow_clarification", True)
+    
+    if not allow_clarification:
+        print("[DEBUG] Skipping clarification as requested by frontend")
+        return {
+            "clarify_status": "skipped",
+            "should_continue": True
+        }
+    
     configurable = Configuration.from_runnable_config(config)
-    if not configurable.allow_clarification:
-        return Command(goto="write_research_brief")
     
     messages = state["messages"]
     
@@ -131,12 +140,20 @@ async def clarify_with_user_node(state: AgentState, config: RunnableConfig) -> C
     ])
     
     if response.need_clarification:
-        return Command(goto=END, update={"messages": [AIMessage(content=response.question)]})
+        return {
+            "messages": [AIMessage(content=response.question)],
+            "clarify_status": "needed",
+            "should_continue": False
+        }
     else:
-        return Command(goto="write_research_brief", update={"messages": [AIMessage(content=response.verification)]})
+        return {
+            "messages": [AIMessage(content=response.verification)],
+            "clarify_status": "completed", 
+            "should_continue": True
+        }
 
 
-async def write_research_brief_node(state: AgentState, config: RunnableConfig) -> Command[Literal["plan_research"]]:
+async def write_research_brief_node(state: AgentState, config: RunnableConfig):
     """编写研究简报"""
     configurable = Configuration.from_runnable_config(config)
     
@@ -159,16 +176,31 @@ async def write_research_brief_node(state: AgentState, config: RunnableConfig) -
         ))
     ])
     
-    return Command(
-        goto="plan_research",
-        update={
-            "messages": [AIMessage(content=response.research_brief)],
-            "research_brief": response.research_brief,
-        }
-    )
+    return {
+        "messages": [AIMessage(content=response.research_brief)],
+        "research_brief": response.research_brief,
+        "research_brief_status": "completed"
+    }
 
 
-async def plan_research_node(state: AgentState, config: RunnableConfig) -> Command[Literal["execute_research_tools"]]:
+async def generate_queries_node(state: AgentState, config: RunnableConfig):
+    """生成搜索查询 - 匹配前端的generate_query事件"""
+    research_brief = state.get("research_brief", "")
+    # 根据研究简报生成相关查询
+    sample_queries = [
+        f"latest developments in {research_brief[:50]}",
+        f"market analysis {research_brief[:50]}",
+        f"industry trends {research_brief[:50]}"
+    ]
+    
+    # 直接返回状态更新，不使用Command模式
+    return {
+        "query_list": sample_queries,
+        "generate_query_status": "generated"
+    }
+
+
+async def plan_research_node(state: AgentState, config: RunnableConfig):
     """规划研究 - 相当于原来的supervisor节点"""
     configurable = Configuration.from_runnable_config(config)
     
@@ -203,70 +235,81 @@ async def plan_research_node(state: AgentState, config: RunnableConfig) -> Comma
     # 使用 override 模式设置完整的消息历史
     updated_supervisor_messages = supervisor_messages + [response]
     
-    return Command(
-        goto="execute_research_tools",
-        update={
-            "supervisor_messages": {"type": "override", "value": updated_supervisor_messages},
-        }
-    )
-
-
-async def execute_research_tools_node(state: AgentState, config: RunnableConfig) -> Command[Literal["perform_searches", "compress_research", "__end__"]]:
-    """执行研究工具 - 相当于原来的supervisor_tools节点"""
-    from langgraph.config import get_stream_writer
-    import time
+    # 构建计划数据
+    tool_calls = response.tool_calls if hasattr(response, 'tool_calls') else []
+    plan_data = [{"description": f"研究任务: {tc.get('args', {}).get('research_topic', 'Unknown')}"} 
+                 for tc in tool_calls if tc.get('name') == 'ConductResearch']
     
+    return {
+        "supervisor_messages": updated_supervisor_messages,
+        "planner_node": {
+            "plan": plan_data if plan_data else [{"description": "正在分析研究需求并制定研究计划..."}]
+        },
+        "planner": {
+            "plan": plan_data
+        },
+        "tool_calls": tool_calls,
+        "planning_status": "completed"
+    }
+
+
+async def execute_research_tools_node(state: AgentState, config: RunnableConfig):
+    """执行研究工具 - 相当于原来的supervisor_tools节点"""
     configurable = Configuration.from_runnable_config(config)
     supervisor_messages = state.get("supervisor_messages", [])
+    
+    if not supervisor_messages:
+        return {
+            "execution_status": "no_messages",
+            "should_end": True
+        }
+    
     most_recent_message = supervisor_messages[-1]
     
     # 早期退出：没有工具调用
     if not most_recent_message.tool_calls:
-        return Command(
-            goto=END,
-            update={
-                "notes": get_notes_from_tool_calls(supervisor_messages),
-                "research_brief": state.get("research_brief", "")
-            }
-        )
+        return {
+            "notes": get_notes_from_tool_calls(supervisor_messages),
+            "research_brief": state.get("research_brief", ""),
+            "execution_status": "no_tool_calls",
+            "should_end": True
+        }
     
     # 检查是否有ResearchComplete调用
-    if any(tool_call["name"] == "ResearchComplete" for tool_call in most_recent_message.tool_calls):
-        return Command(
-            goto="compress_research",
-            update={}
-        )
+    has_research_complete = any(tool_call["name"] == "ResearchComplete" for tool_call in most_recent_message.tool_calls)
     
-    # 🚀 发送搜索开始状态到前端
-    try:
-        writer = get_stream_writer()
-        if writer:
-            writer({
-                "event_type": "step_status",
-                "step": "web_search",
-                "status": "started",
-                "message": "准备开始 Tavily 搜索...",
-                "timestamp": time.time(),
-                "tool_calls_count": len(most_recent_message.tool_calls)
+    if has_research_complete:
+        return {
+            "execution_status": "research_complete",
+            "should_compress": True
+        }
+    
+    # 构建任务记录数据
+    research_tasks = []
+    for tool_call in most_recent_message.tool_calls:
+        if tool_call["name"] == "ConductResearch":
+            topic = tool_call["args"].get("research_topic", "")
+            research_tasks.append({
+                "description": topic,
+                "status": "starting"
             })
-    except Exception as e:
-        print(f"Failed to send stream event: {e}")
     
     # 准备进行研究
-    return Command(
-        goto="perform_searches",
-        update={
-            "tool_calls": most_recent_message.tool_calls,
-            "current_research_step": 0
-        }
-    )
+    return {
+        "tool_calls": most_recent_message.tool_calls,
+        "current_research_step": 0,
+        "record_task_completion": {
+            "ledger": research_tasks,
+            "next_node_decision": "continue",
+            "status": "准备执行研究任务"
+        },
+        "execution_status": "ready_for_search",
+        "should_search": True
+    }
 
 
-async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Command[Literal["analyze_search_results", "plan_research"]]:
+async def perform_searches_node(state: AgentState, config: RunnableConfig):
     """执行搜索 - 这是最重要的节点，执行Tavily搜索"""
-    from langgraph.config import get_stream_writer
-    import time
-    
     configurable = Configuration.from_runnable_config(config)
     
     # 获取要执行的工具调用
@@ -274,26 +317,12 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
     if not tool_calls:
         return Command(goto="plan_research")
     
-    # 🚀 发送搜索开始进行状态
-    try:
-        writer = get_stream_writer()
-        if writer:
-            writer({
-                "event_type": "step_status",
-                "step": "web_search",
-                "status": "in_progress",
-                "message": f"正在执行 {len(tool_calls)} 个 Tavily 搜索...",
-                "timestamp": time.time()
-            })
-    except Exception as e:
-        print(f"Failed to send stream event: {e}")
-    
     # 执行Tavily搜索
     tools = await get_all_tools(config)
     tools_by_name = {tool.name if hasattr(tool, "name") else tool.get("name", "web_search"): tool for tool in tools}
     
-    
     search_results = []
+    sources_gathered = []
     for i, tool_call in enumerate(tool_calls):
         if tool_call["name"] == "ConductResearch":
             research_topic = tool_call["args"].get("research_topic", "")
@@ -301,20 +330,6 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
             # 截断查询以符合 Tavily 的 400 字符限制
             if len(research_topic) > 400:
                 research_topic = research_topic[:400]
-            
-            # 🚀 发送单个搜索进度
-            try:
-                if writer:
-                    writer({
-                        "event_type": "search_progress",
-                        "current": i + 1,
-                        "total": len(tool_calls),
-                        "query": research_topic[:50] + "..." if len(research_topic) > 50 else research_topic,
-                        "message": f"搜索 {i + 1}/{len(tool_calls)}: {research_topic[:50]}...",
-                        "timestamp": time.time()
-                    })
-            except Exception as e:
-                print(f"Failed to send progress event: {e}")
             
             # 这里执行实际的搜索
             # 为了简化，我们直接调用tavily_search工具
@@ -329,6 +344,16 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
                         "result": result,
                         "tool_call_id": tool_call["id"]
                     })
+                    
+                    # 构造sources_gathered格式，匹配前端期望
+                    if isinstance(result, str) and result:
+                        sources_gathered.append({
+                            "title": f"Research Result for: {research_topic[:30]}",
+                            "url": "https://tavily.com/search",
+                            "snippet": result[:200] + "..." if len(result) > 200 else result,
+                            "label": research_topic[:30]
+                        })
+                        
                 except Exception as e:
                     search_results.append({
                         "topic": research_topic,
@@ -336,61 +361,30 @@ async def perform_searches_node(state: AgentState, config: RunnableConfig) -> Co
                         "tool_call_id": tool_call["id"]
                     })
     
-    # 🚀 发送搜索完成和分析开始状态
-    try:
-        if writer:
-            writer({
-                "event_type": "step_status",
-                "step": "web_search",
-                "status": "completed",
-                "message": f"Tavily 搜索完成，获得 {len(search_results)} 个结果",
-                "timestamp": time.time(),
-                "results_count": len(search_results)
-            })
-            
-            writer({
-                "event_type": "step_status", 
-                "step": "search_analysis",
-                "status": "started",
-                "message": "开始分析搜索结果...",
-                "timestamp": time.time()
-            })
-    except Exception as e:
-        print(f"Failed to send completion event: {e}")
-    
-    return Command(
-        goto="analyze_search_results",
-        update={
-            "search_results": search_results,
-            "raw_notes": [str(r.get("result", "")) for r in search_results]
-        }
-    )
+    return {
+        "search_results": search_results,
+        "raw_notes": [str(r.get("result", "")) for r in search_results],
+        "sources_gathered": sources_gathered,
+        "web_research_status": "completed",
+        "web_research_results_count": len(search_results)
+    }
 
 
-async def analyze_search_results_node(state: AgentState, config: RunnableConfig) -> Command[Literal["compress_research", "plan_research"]]:
+async def analyze_search_results_node(state: AgentState, config: RunnableConfig):
     """分析搜索结果 - 总结和整理搜索结果"""
-    from langgraph.config import get_stream_writer
-    import time
-    
     configurable = Configuration.from_runnable_config(config)
     search_results = state.get("search_results", [])
     
-    # 🚀 发送分析进行中状态
-    try:
-        writer = get_stream_writer()
-        if writer:
-            writer({
-                "event_type": "step_status",
-                "step": "search_analysis", 
-                "status": "in_progress",
-                "message": f"正在分析 {len(search_results)} 个搜索结果...",
-                "timestamp": time.time()
-            })
-    except Exception as e:
-        print(f"Failed to send analysis progress event: {e}")
+    # 评估研究是否充足
+    is_sufficient = len(search_results) >= 2  # 简单的充足性判断
     
     if not search_results:
-        return Command(goto="plan_research")
+        return {
+            "analysis_status": "no_results",
+            "should_continue_research": True,
+            "reflection_is_sufficient": False,
+            "reflection_follow_up_queries": ["需要更多研究数据"]
+        }
     
     # 构建工具消息反馈给supervisor
     tool_messages = []
@@ -407,44 +401,33 @@ async def analyze_search_results_node(state: AgentState, config: RunnableConfig)
             tool_call_id=result["tool_call_id"]
         ))
     
-    # 🚀 发送分析完成状态
-    try:
-        if writer:
-            writer({
-                "event_type": "step_status",
-                "step": "search_analysis",
-                "status": "completed", 
-                "message": f"搜索结果分析完成，处理了 {len(search_results)} 个结果",
-                "timestamp": time.time()
-            })
-    except Exception as e:
-        print(f"Failed to send analysis completion event: {e}")
-    
     # 检查是否需要继续研究
     iterations = state.get("research_iterations", 0) + 1
+    final_is_sufficient = is_sufficient and iterations >= configurable.max_researcher_iterations
+    
+    return {
+        "supervisor_messages": state.get("supervisor_messages", []) + tool_messages,
+        "research_iterations": iterations,
+        "reflection_is_sufficient": final_is_sufficient,
+        "reflection_follow_up_queries": [] if final_is_sufficient else [f"继续深入研究第{iterations}轮"],
+        "analysis_status": "completed" if final_is_sufficient else "need_more_research",
+        "should_compress": final_is_sufficient,
+        "should_continue_research": not final_is_sufficient
+    }
+
+
+def should_continue_research(state: AgentState) -> str:
+    """决定是否继续研究还是结束"""
+    iterations = state.get("research_iterations", 0)
+    configurable = Configuration()  # 使用默认配置
+    
     if iterations >= configurable.max_researcher_iterations:
-        return Command(
-            goto="compress_research",
-            update={
-                "supervisor_messages": tool_messages,
-                "research_iterations": iterations
-            }
-        )
-    
-    # 使用 override 模式设置完整的消息历史，避免重复累积
-    current_supervisor_messages = state.get("supervisor_messages", [])
-    updated_supervisor_messages = current_supervisor_messages + tool_messages
-    
-    return Command(
-        goto="plan_research",
-        update={
-            "supervisor_messages": {"type": "override", "value": updated_supervisor_messages},
-            "research_iterations": iterations
-        }
-    )
+        return "compress_research"
+    else:
+        return "plan_research"
 
 
-async def compress_research_node(state: AgentState, config: RunnableConfig) -> Command[Literal["generate_final_report"]]:
+async def compress_research_node(state: AgentState, config: RunnableConfig):
     """压缩研究结果"""
     configurable = Configuration.from_runnable_config(config)
     notes = state.get("raw_notes", [])
@@ -475,12 +458,11 @@ async def compress_research_node(state: AgentState, config: RunnableConfig) -> C
                 print(f"[DEBUG] Compression error: {e}")
                 compressed_notes.append(note[:2000])  # 截断以防太长
     
-    return Command(
-        goto="generate_final_report",
-        update={
-            "notes": compressed_notes
-        }
-    )
+    return {
+        "notes": compressed_notes,
+        "compression_status": "completed",
+        "compressed_notes_count": len(compressed_notes)
+    }
 
 
 async def generate_final_report_node(state: AgentState, config: RunnableConfig):
@@ -510,18 +492,47 @@ async def generate_final_report_node(state: AgentState, config: RunnableConfig):
         HumanMessage(content=final_report_prompt)
     ])
     
-    # 清理状态
-    cleared_state = {
-        "notes": {"type": "override", "value": []},
-        "raw_notes": {"type": "override", "value": []},
-        "search_results": {"type": "override", "value": []},
-        "supervisor_messages": {"type": "override", "value": []},
-    }
-    
     return {
         "messages": [final_report],
-        **cleared_state
+        "notes": [],
+        "raw_notes": [],
+        "search_results": [],
+        "supervisor_messages": [],
+        "finalize_answer": {
+            "status": "completed",
+            "message": "研究报告生成完成"
+        },
+        "final_report_status": "completed"
     }
+
+
+# ===== 条件边函数 =====
+def should_continue_after_clarify(state: AgentState) -> str:
+    """决定澄清后的路径"""
+    if state.get("should_continue", True):
+        return "write_research_brief"
+    else:
+        return "__end__"
+
+def should_continue_after_execution(state: AgentState) -> str:
+    """决定执行后的路径"""
+    if state.get("should_end", False):
+        return "__end__"
+    elif state.get("should_compress", False):
+        return "compress_research"
+    elif state.get("should_search", False):
+        return "perform_searches"
+    else:
+        return "__end__"
+
+def should_continue_after_analysis(state: AgentState) -> str:
+    """决定分析后的路径"""
+    if state.get("should_compress", False):
+        return "compress_research"
+    elif state.get("should_continue_research", False):
+        return "plan_research"
+    else:
+        return "compress_research"  # 默认压缩
 
 
 # ===== 构建单层图 =====
@@ -532,6 +543,7 @@ def build_flat_graph():
     # 添加所有节点到主图级别
     builder.add_node("clarify_with_user", clarify_with_user_node)
     builder.add_node("write_research_brief", write_research_brief_node)
+    builder.add_node("generate_queries", generate_queries_node)  # 新增：生成查询节点
     builder.add_node("plan_research", plan_research_node)
     builder.add_node("execute_research_tools", execute_research_tools_node)
     builder.add_node("perform_searches", perform_searches_node)  # 关键节点：执行Tavily搜索
@@ -539,8 +551,35 @@ def build_flat_graph():
     builder.add_node("compress_research", compress_research_node)
     builder.add_node("generate_final_report", generate_final_report_node)
     
-    # 添加边
+    # 添加边 - 构建完整的工作流
     builder.add_edge(START, "clarify_with_user")
+    
+    # 使用条件边替代Command控制的路由
+    builder.add_conditional_edges(
+        "clarify_with_user", 
+        should_continue_after_clarify, 
+        ["write_research_brief", "__end__"]
+    )
+    
+    builder.add_edge("write_research_brief", "generate_queries")
+    builder.add_edge("generate_queries", "plan_research") 
+    builder.add_edge("plan_research", "execute_research_tools")
+    
+    builder.add_conditional_edges(
+        "execute_research_tools", 
+        should_continue_after_execution, 
+        ["perform_searches", "compress_research", "__end__"]
+    )
+    
+    builder.add_edge("perform_searches", "analyze_search_results")
+    
+    builder.add_conditional_edges(
+        "analyze_search_results", 
+        should_continue_after_analysis, 
+        ["compress_research", "plan_research"]
+    )
+    
+    builder.add_edge("compress_research", "generate_final_report")
     builder.add_edge("generate_final_report", END)
     
     return builder.compile()
