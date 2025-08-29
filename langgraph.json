@@ -3,7 +3,8 @@
     "graphs": {
       "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher",
       "Deep Researcher Flat": "./src/open_deep_research/flat_graph.py:flat_researcher",
-      "Deep Researcher New": "./src/open_deep_research/deep_researcher_new.py:deep_researcher_new"
+      "Deep Researcher New": "./src/open_deep_research/deep_researcher_new.py:deep_researcher_new",
+      "Deep Researcher New Lite": "./src/open_deep_research/deep_researcher_new_lite.py:deep_researcher_new_lite"
     },
     "python_version": "3.11",
     "env": "./.env",
