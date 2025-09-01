@@ -136,6 +136,8 @@ async def clarify_with_user_node_lite(state: AgentState, config: RunnableConfig)
     messages = state["messages"]
     configurable = Configuration.from_runnable_config(config)
     
+    print(f"[DEBUG] clarify_with_user_node_lite - Processing {len(messages)} messages")
+    
     # 使用轻量级模型
     model_config = get_model_config(
         configurable.compression_model,  # 使用compression_model而不是research_model
@@ -148,13 +150,18 @@ async def clarify_with_user_node_lite(state: AgentState, config: RunnableConfig)
     try:
         response = await model.ainvoke([HumanMessage(content=clarify_with_user_instructions.format(messages=get_buffer_string(messages), date=get_today_str()))])
         
+        print(f"[DEBUG] clarify_with_user_node_lite - Model response: need_clarification={response.need_clarification}")
+        
         if response.need_clarification:
+            print(f"[DEBUG] clarify_with_user_node_lite - Needs clarification, returning END state")
+            print(f"[DEBUG] Clarification question: {response.question}")
             return {
                 "messages": [AIMessage(content=response.question)],
                 "clarify_status": "needs_clarification",
                 "next_node": "__end__"
             }
         else:
+            print(f"[DEBUG] clarify_with_user_node_lite - No clarification needed, proceeding to research")
             return {
                 "messages": [AIMessage(content=response.verification)],
                 "clarify_status": "completed_lite",
@@ -172,6 +179,9 @@ async def clarify_with_user_node_lite(state: AgentState, config: RunnableConfig)
 async def write_research_brief_node_lite(state: AgentState, config: RunnableConfig):
     """编写研究纲要 - LITE版本"""
     print("[DEBUG] write_research_brief_node_lite - Starting")
+    clarify_status = state.get("clarify_status", "unknown")
+    print(f"[DEBUG] write_research_brief_node_lite - Previous clarify_status: {clarify_status}")
+    print(f"[DEBUG] write_research_brief_node_lite - State keys: {list(state.keys())}")
     configurable = Configuration.from_runnable_config(config)
     
     # 使用轻量级模型
@@ -289,6 +299,17 @@ Today's date is {get_today_str()}."""
 def should_continue_after_clarify_lite(state: AgentState) -> str:
     """决定澄清后的路径"""
     next_node = state.get("next_node", "write_research_brief")
+    clarify_status = state.get("clarify_status", "unknown")
+    print(f"[DEBUG] should_continue_after_clarify_lite - state keys: {list(state.keys())}")
+    print(f"[DEBUG] should_continue_after_clarify_lite - next_node: {next_node}")
+    print(f"[DEBUG] should_continue_after_clarify_lite - clarify_status: {clarify_status}")
+    
+    # 如果是__end__，应该结束流程等待用户回复
+    if next_node == "__end__":
+        print(f"[DEBUG] should_continue_after_clarify_lite - Returning END to stop execution")
+        return END
+    
+    print(f"[DEBUG] should_continue_after_clarify_lite - Continuing to: {next_node}")
     return next_node
 
 def should_continue_after_brief_lite(state: AgentState) -> str:

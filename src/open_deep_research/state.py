@@ -64,6 +64,9 @@ class AgentState(MessagesState):
     # 实时步骤状态追踪
     step_status: dict = {}
     current_step: Optional[str] = None
+    # 添加澄清相关字段
+    clarify_status: Optional[str] = None
+    next_node: Optional[str] = None
 
 class SupervisorState(TypedDict):
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
